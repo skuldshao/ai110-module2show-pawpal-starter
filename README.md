@@ -42,17 +42,45 @@ pip install -r requirements.txt
 6. Connect your logic to the Streamlit UI in `app.py`.
 7. Refine UML so it matches what you actually built.
 
+## 🛠️ Implementation Summary
+
+I built the core logic for PawPal+ in `pawpal_system.py` as four classes that build on each other:
+
+- **`Task`** is a single care activity. I gave it a description, start time, duration, priority (low, medium or high), frequency (once, daily or weekly) and a completed flag. It checks its own values when it's created, so a bad priority or a zero-minute task is rejected right away.
+- **`Pet`** stores a pet's name, species and age, along with its own list of tasks. I can add, find and remove tasks on each pet.
+- **`Owner`** holds several pets and the number of minutes the owner has free today. Its `get_all_tasks()` method collects every task from every pet into one list of `(pet, task)` pairs.
+- **`Scheduler`** is the "brain." I made it read all of its data through `Owner.get_all_tasks()` instead of from any single pet, so every pet is always included. From that list it can:
+  - filter tasks by pet or status
+  - sort them by time or priority
+  - build today's schedule by keeping the highest-priority tasks that fit the time budget, then ordering them by start time
+  - report the tasks that didn't fit
+  - flag tasks whose times overlap
+  - mark tasks complete, and set daily tasks back to pending for a new day
+
+Together, they work like this: `Owner` → `Pet` → `Task` holds the data, and `Scheduler` sits on top of `Owner` and makes the decisions. `main.py` is my terminal testing ground. It creates an owner with two pets and six tasks, then prints the schedule shown below. `tests/test_pawpal.py` checks that completing a task and adding a task to a pet work correctly.
+
 ## 🖥️ Sample Output
 
-Paste a sample of your app's CLI or Streamlit output here so a reader can see what a generated plan looks like:
+Output from running `python main.py`:
 
 ```
-# e.g.:
-# Daily plan for Biscuit (Golden Retriever):
-#   08:00 — Morning walk (30 min) [priority: high]
-#   09:00 — Feeding (10 min) [priority: high]
-#   ...
+🐾 Today's Schedule for Jordan
+============================================================
+Time   Pet     Task                  Length   Priority
+------------------------------------------------------------
+07:30  Mochi   Morning walk          30 min   high
+08:00  Luna    Breakfast             5 min    high
+08:15  Luna    Thyroid medication    5 min    high
+18:00  Mochi   Dinner                10 min   high
+19:30  Luna    Brush fur             15 min   medium
+------------------------------------------------------------
+Total: 65 of 90 available minutes
+
+Skipped (not enough time):
+  - Mochi: Fetch in the yard (40 min, low)
 ```
+
+Jordan has 90 minutes free today. The scheduler keeps high-priority tasks first, lists them by start time, and skips the low-priority 40-minute fetch session because it would go over the time budget.
 
 ## 🧪 Testing PawPal+
 
@@ -74,12 +102,12 @@ Sample test output:
 
 > Fill in once you've implemented scheduling logic.
 
-| Feature | Method(s) | Notes |
-|---------|-----------|-------|
-| Task sorting | | e.g., by priority, duration |
-| Filtering | | e.g., skip tasks if time runs out |
-| Conflict handling | | e.g., overlapping time slots |
-| Recurring tasks | | e.g., daily vs. weekly |
+| Feature           | Method(s) | Notes                             |
+| ----------------- | --------- | --------------------------------- |
+| Task sorting      |           | e.g., by priority, duration       |
+| Filtering         |           | e.g., skip tasks if time runs out |
+| Conflict handling |           | e.g., overlapping time slots      |
+| Recurring tasks   |           | e.g., daily vs. weekly            |
 
 ## 📸 Demo Walkthrough
 
@@ -91,4 +119,4 @@ Describe your app in numbered steps so a reader can follow along without watchin
 4. <!-- Describe this step -->
 5. <!-- Add more steps as needed -->
 
-**Screenshot or video** *(optional)*: <!-- Insert a screenshot or link to a demo video here -->
+**Screenshot or video** _(optional)_: <!-- Insert a screenshot or link to a demo video here -->
