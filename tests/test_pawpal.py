@@ -247,3 +247,185 @@ def test_completed_and_future_tasks_are_not_checked_for_conflicts():
 
     # Today's walk is done and tomorrow's isn't due yet, so Breakfast has nothing to clash with.
     assert scheduler.find_conflicts(TODAY) == []
+
+
+# --- Sorting: priority order and edge cases -----------------------------------
+
+
+def test_sort_by_priority_orders_high_to_low_then_by_time():
+    scheduler = make_scheduler()
+
+    ordered = [t.description for _, t in scheduler.sort_by_priority(scheduler.get_tasks())]
+
+    # The three high tasks come first, earliest start first; the low task comes last.
+    assert ordered == ["Morning walk", "Breakfast", "Dinner", "Brush fur"]
+
+
+def test_sorting_an_empty_list_returns_empty_list():
+    assert Scheduler.sort_by_time([]) == []
+    assert Scheduler.sort_by_priority([]) == []
+
+
+def test_overdue_task_is_listed_before_todays_tasks():
+    owner = Owner(name="Jordan")
+    mochi = Pet(name="Mochi", species="dog")
+    owner.add_pet(mochi)
+    mochi.add_task(Task("Walk", "07:00", due_date=TODAY))
+    mochi.add_task(Task("Missed dinner", "18:00", due_date=TODAY - timedelta(days=1)))
+
+    plan = [t.description for _, t in Scheduler(owner).todays_schedule(TODAY)]
+
+    # due_date is the first sort key, so yesterday's task leads even though 18:00 > 07:00.
+    assert plan == ["Missed dinner", "Walk"]
+
+
+# --- Recurrence: finished early -------------------------------------------------
+
+
+def test_weekly_task_finished_early_counts_from_its_due_date():
+    task = Task("Bath", "10:00", frequency="weekly", due_date=date(2026, 10, 10))
+
+    # Done a week early: the next copy still lands a week after the original due date.
+    assert task.next_occurrence(today=TODAY).due_date == date(2026, 10, 17)
+
+
+# --- Daily plan: time budget ---------------------------------------------------
+
+
+def budget_scheduler(available_minutes, *tasks):
+    """Build a one-pet scheduler with the given time budget; every task is due TODAY."""
+    owner = Owner(name="Jordan", available_minutes=available_minutes)
+    mochi = Pet(name="Mochi", species="dog")
+    owner.add_pet(mochi)
+    for task in tasks:
+        task.due_date = TODAY
+        mochi.add_task(task)
+    return Scheduler(owner)
+
+
+def test_tasks_that_exactly_fill_the_budget_are_all_scheduled():
+    scheduler = budget_scheduler(
+        45, Task("Walk", "07:00", 30, "high"), Task("Feed", "08:00", 15, "low")
+    )
+
+    # 30 + 15 == 45, and the check is <=, so nothing is skipped.
+    assert len(scheduler.todays_schedule(TODAY)) == 2
+    assert scheduler.skipped_tasks(TODAY) == []
+
+
+def test_task_too_long_for_budget_is_skipped_but_shorter_one_still_fits():
+    scheduler = budget_scheduler(
+        40,
+        Task("Walk", "07:00", 30, "high"),
+        Task("Grooming", "09:00", 20, "medium"),  # 30 + 20 > 40, so skipped
+        Task("Feed", "08:00", 10, "low"),  # 30 + 10 == 40, still fits
+    )
+
+    assert [t.description for _, t in scheduler.todays_schedule(TODAY)] == ["Walk", "Feed"]
+    assert [t.description for _, t in scheduler.skipped_tasks(TODAY)] == ["Grooming"]
+
+
+def test_zero_minutes_available_gives_empty_plan():
+    scheduler = budget_scheduler(0, Task("Walk", "07:00", 30))
+
+    assert scheduler.todays_schedule(TODAY) == []
+    assert len(scheduler.skipped_tasks(TODAY)) == 1
+
+
+def test_due_tasks_includes_overdue_and_excludes_future_and_completed():
+    owner = Owner(name="Jordan")
+    mochi = Pet(name="Mochi", species="dog")
+    owner.add_pet(mochi)
+    mochi.add_task(Task("Overdue", "07:00", due_date=TODAY - timedelta(days=2)))
+    mochi.add_task(Task("Today", "08:00", due_date=TODAY))
+    mochi.add_task(Task("Tomorrow", "09:00", due_date=TODAY + timedelta(days=1)))
+    mochi.add_task(Task("Done", "10:00", completed=True, due_date=TODAY))
+
+    due = {t.description for _, t in Scheduler(owner).due_tasks(TODAY)}
+
+    assert due == {"Overdue", "Today"}
+
+
+# --- Conflicts: more than two tasks and skipped tasks ---------------------------
+
+
+def test_three_tasks_at_same_time_give_three_conflict_pairs():
+    scheduler = conflict_scheduler(
+        ("Mochi", Task("Walk", "08:00", 15)),
+        ("Luna", Task("Feed", "08:00", 5)),
+        ("Pip", Task("Meds", "08:00", 5)),
+    )
+
+    # Every pair clashes: A-B, A-C, B-C.
+    assert len(scheduler.find_conflicts(TODAY)) == 3
+    assert all("start at the same time" in w for w in scheduler.conflict_warnings(TODAY))
+
+
+def test_task_skipped_for_time_is_not_reported_as_conflict():
+    scheduler = budget_scheduler(
+        30,
+        Task("Walk", "08:00", 30, "high"),
+        Task("Grooming", "08:00", 20, "low"),  # same start, but doesn't fit the budget
+    )
+
+    # Conflicts are checked on today's plan only, and Grooming never made the plan.
+    assert scheduler.find_conflicts(TODAY) == []
+
+
+# --- Empty data ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize("with_pet", [False, True])
+def test_owner_with_no_pets_or_pet_with_no_tasks_returns_empty_results(with_pet):
+    owner = Owner(name="Jordan")
+    if with_pet:
+        owner.add_pet(Pet(name="Mochi", species="dog"))
+    scheduler = Scheduler(owner)
+
+    assert scheduler.get_tasks() == []
+    assert scheduler.due_tasks(TODAY) == []
+    assert scheduler.todays_schedule(TODAY) == []
+    assert scheduler.skipped_tasks(TODAY) == []
+    assert scheduler.find_conflicts(TODAY) == []
+    assert scheduler.conflict_warnings(TODAY) == []
+
+
+# --- Validation ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [{"priority": "urgent"}, {"frequency": "monthly"}, {"duration_minutes": 0}, {"duration_minutes": -5}],
+)
+def test_task_rejects_invalid_fields(kwargs):
+    with pytest.raises(ValueError):
+        Task("Walk", "07:00", **kwargs)
+
+
+def test_remove_task_removes_every_task_with_that_description():
+    pet = Pet(name="Mochi", species="dog")
+    pet.add_task(Task("Walk", "07:00", completed=True))
+    pet.add_task(Task("Walk", "07:00"))
+    pet.add_task(Task("Feed", "08:00"))
+
+    assert pet.remove_task("Walk") is True
+    # Completed history copies are removed too, not just the pending one.
+    assert [t.description for t in pet.tasks] == ["Feed"]
+
+
+# --- Regression tests for fixed bugs -------------------------------------------
+
+
+def test_mark_task_complete_ignores_pet_name_case():
+    scheduler = make_scheduler()
+
+    assert scheduler.mark_task_complete("mochi", "Dinner") is True
+
+
+def test_task_running_past_midnight_conflicts_with_early_morning_task():
+    scheduler = conflict_scheduler(
+        ("Mochi", Task("Night meds", "23:50", 20)),  # 23:50-00:10
+        ("Luna", Task("Early feed", "00:05", 5)),
+    )
+
+    assert len(scheduler.find_conflicts(TODAY)) == 1

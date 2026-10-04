@@ -177,8 +177,12 @@ class Owner:
         return len(self.pets) < before
 
     def find_pet(self, name: str) -> Optional[Pet]:
-        """Return the first pet with this name, or None if the owner has no such pet."""
-        return next((p for p in self.pets if p.name == name), None)
+        """Return the first pet with this name, or None if the owner has no such pet.
+
+        Matching ignores case and surrounding spaces, the same as Scheduler.get_tasks().
+        """
+        wanted = name.strip().lower()
+        return next((p for p in self.pets if p.name.lower() == wanted), None)
 
     def get_all_tasks(self) -> List[Tuple[Pet, Task]]:
         """Return every task from every pet as (pet, task) pairs, in pet order."""
@@ -342,6 +346,17 @@ class Scheduler:
             # This task may still be running when later tasks start, so check it against them too.
             # Dropping finished tasks is safe: the list is sorted, so later tasks start even later.
             running.append((pet, task))
+        # The sweep only sees clock order, so a task running past midnight (23:50-00:10)
+        # is never compared with early-morning tasks. Check that wrapped part separately.
+        found = {(id(a), id(b)) for (_, a), (_, b) in conflicts}
+        for late_pet, late in schedule:
+            wrapped_end = late.end_minute - 24 * 60  # minutes it runs into the next morning
+            if wrapped_end <= 0:
+                continue
+            for pet, task in schedule:
+                if task is not late and task.start_minute < wrapped_end \
+                        and (id(late), id(task)) not in found and (id(task), id(late)) not in found:
+                    conflicts.append(((late_pet, late), (pet, task)))
         return conflicts
 
     def conflict_warnings(self, today: Optional[date] = None) -> List[str]:

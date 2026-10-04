@@ -57,7 +57,7 @@ I built the core logic for PawPal+ in `pawpal_system.py` as four classes that bu
   - flag tasks whose times overlap, as readable warnings
   - mark tasks complete, and automatically add the next copy of daily and weekly tasks
 
-Together, they work like this: `Owner` → `Pet` → `Task` holds the data, and `Scheduler` sits on top of `Owner` and makes the decisions. `main.py` is my terminal testing ground. It creates an owner with two pets and eight tasks (added out of order on purpose), completes a few of them, and prints each sorted and filtered view, then today's schedule and any conflicts. `tests/test_pawpal.py` has 25 tests covering every feature in the Smarter Scheduling section below.
+Together, they work like this: `Owner` → `Pet` → `Task` holds the data, and `Scheduler` sits on top of `Owner` and makes the decisions. `main.py` is my terminal testing ground. It creates an owner with two pets and eight tasks (added out of order on purpose), completes a few of them, and prints each sorted and filtered view, then today's schedule and any conflicts. `tests/test_pawpal.py` has 44 tests covering every feature in the Smarter Scheduling section below, plus edge cases like empty data and tasks that run past midnight.
 
 ## 🖥️ Sample Output
 
@@ -85,25 +85,94 @@ Jordan has 90 minutes free today. Breakfast, Brush fur and Fetch in the yard wer
 
 ## 🧪 Testing PawPal+
 
-```bash
-# Run the full test suite:
-pytest
+### How to run the tests
 
-# Run with coverage:
-pytest --cov
+From the project folder, with the virtual environment active, I run:
+
+```bash
+python -m pytest
 ```
 
-Sample test output:
+That finds and runs every test in `tests/test_pawpal.py`. If I want to see each test's name as it runs, I add `-v`:
+
+```bash
+python -m pytest -v
+```
+
+### What my tests cover
+
+I have **44 tests** in `tests/test_pawpal.py`. Before I wrote them, I listed the five behaviors PawPal+ can't get wrong, then wrote at least one "happy path" test for each (the normal case works) and several edge-case tests (empty data, ties, boundaries, odd dates).
+
+**1. Sorting (tasks come back in chronological order)**
+- Tasks I add out of order come back sorted by time. When two tasks start at the same minute, the high-priority one comes first.
+- `sort_by_priority()` puts high before medium before low, and breaks ties by earlier start time.
+- Sorting an empty list returns an empty list instead of crashing.
+- An overdue task from yesterday is listed before today's tasks, because due date is the first sort key.
+- Times given as strings (`"7:05"`, `"19:45"`) turn into real times, and bad ones (`"25:00"`, `"7.30"`, `"noon"`, `""`) are rejected.
+
+**2. Recurring tasks (finishing a daily task creates tomorrow's copy)**
+- Marking a daily task complete keeps the finished one as history and adds a new pending copy due the next day. That copy stays off today's schedule and shows up on tomorrow's.
+- Daily tasks move forward 1 day and weekly tasks 7 days, including across a month (Jan 31 → Feb 1) and a year (Dec 29 → Jan 5).
+- A task I finish three days late is next due tomorrow, not in the past. A weekly task I finish early is next due a week after its *original* due date.
+- A `"once"` task doesn't come back.
+- Completing the same task twice in a row completes the new copy, not the old one.
+- Asking to complete a task for a pet or task that doesn't exist returns `False` instead of crashing.
+
+**3. Conflict detection (flagging duplicate and overlapping times)**
+- Two tasks at the exact same time are flagged, whether they're for the same pet or for different pets, and the warning says "start at the same time."
+- A partial overlap (a 07:45 breakfast during a 07:30–08:00 walk) is flagged, and the warning shows both full time windows.
+- Back-to-back tasks (one ends at 08:00, the next starts at 08:00) are **not** a conflict.
+- One long task overlapping two short ones is reported twice, and three tasks at the same time give all three pairs.
+- Completed tasks, future copies and tasks skipped because time ran out are never reported as conflicts.
+- A task that runs past midnight (23:50–00:10) is flagged against one at 00:05.
+
+**4. Building today's plan within the time budget**
+- Tasks that exactly fill the available minutes are all kept.
+- If a task doesn't fit, it's skipped, but a shorter, lower-priority task after it can still fit. `skipped_tasks()` returns exactly the ones left out.
+- With 0 minutes available, the plan is empty and everything is reported as skipped.
+- `due_tasks()` includes overdue tasks and leaves out future and completed ones.
+
+**5. Filtering, empty data and validation**
+- Filtering by pet name ignores case, and the pet and status filters work together. An unknown pet gives an empty list.
+- An owner with no pets, and a pet with no tasks, both get empty results from every scheduler method, with no errors.
+- A task with a bad priority, a bad frequency or a zero or negative duration is rejected when it's created.
+- `remove_task()` removes every task with that description, including completed history copies.
+
+### Bugs my tests caught
+
+Two of my edge-case tests failed at first, and in both cases the bug was in `pawpal_system.py`, not in the test:
+
+1. **Pet names were case-sensitive in one place.** `get_tasks("mochi")` found Mochi, but `mark_task_complete("mochi", ...)` didn't, because `Owner.find_pet()` compared names exactly. I made `find_pet()` ignore case and extra spaces, like `get_tasks()` does.
+2. **Overlaps across midnight were missed.** `find_conflicts()` compares tasks in clock order, so a 23:50 task lasting 20 minutes was never compared with a 00:05 task, even though they overlap. I added a check for the part of a task that runs past midnight.
+
+I kept both tests in the suite so these bugs can't sneak back in.
+
+### Test results
+
+Output from `python -m pytest`:
 
 ```
 ============================= test session starts ==============================
-platform darwin -- Python 3.8.8, pytest-8.3.5, pluggy-1.5.0
-collected 25 items
+platform darwin -- Python 3.8.8, pytest-6.2.3, py-1.10.0, pluggy-0.13.1
+rootdir: /Users/skuldshao/Desktop/New/ai110-module2show-pawpal-starter
+plugins: anyio-4.5.2
+collected 44 items
 
-tests/test_pawpal.py .........................                           [100%]
+tests/test_pawpal.py ............................................        [100%]
 
-============================== 25 passed in 0.02s ==============================
+============================== 44 passed in 0.03s ==============================
 ```
+
+### Confidence level: ⭐⭐⭐⭐☆ (4 out of 5)
+
+I'm confident in the scheduling logic itself. All 44 tests pass, every core behavior has both happy-path and edge-case tests, and writing those tests found and fixed two real bugs. I pinned the date in the date-based tests, so they give the same result no matter what day I run them.
+
+I'm not giving it 5 stars, for these reasons:
+
+- **The Streamlit UI isn't tested automatically.** My tests check `pawpal_system.py`, but I've only checked `app.py` by clicking through it by hand.
+- **The scheduler is greedy, not optimal.** It always takes the highest-priority task that fits, so it sometimes leaves time unused that a different mix of lower-priority tasks could fill. The tests confirm it behaves the way I designed it, but that design has limits.
+- **It plans one day at a time.** It doesn't plan ahead across a week, and it only reports conflicts without suggesting a fix.
+- **Nothing is saved.** Tasks live in memory, so there's nothing yet to test around saving and loading data.
 
 ## 📐 Smarter Scheduling
 
@@ -181,7 +250,7 @@ Because the list is sorted, a task that has ended can never overlap anything lat
 
 Nothing is ever raised. If there are no conflicts, the method returns an empty list, so the caller just prints whatever comes back. `main.py` prints these lines under the schedule, and the Streamlit app shows each one as a red warning after "Generate schedule."
 
-**What it doesn't do.** It reports conflicts but doesn't fix them, because I want the owner to decide what to move. It only checks tasks on today's plan, so completed tasks, tasks skipped for time and future recurring copies are ignored.
+**What it doesn't do.** It reports conflicts but doesn't fix them, because I want the owner to decide what to move. It only checks tasks on today's plan, so completed tasks, tasks skipped for time and future recurring copies are ignored. It does handle a late-night task that runs past midnight: a 23:50–00:10 task is still flagged against one at 00:05.
 
 ### 4. Recurring tasks
 
@@ -206,12 +275,7 @@ In the Streamlit app, I added a **Mark a task done** form. After you click it, t
 
 ### How I tested it
 
-`tests/test_pawpal.py` has 25 tests, and `python -m pytest` runs them all. Beyond the two starter tests, they cover:
-
-- **Sorting:** times given as strings are parsed correctly, bad times are rejected, and tasks sort by time with the priority tie-breaker.
-- **Filtering:** pet names match regardless of case, and the pet and status filters work together. An unknown pet returns an empty list.
-- **Recurring tasks:** the daily and weekly next dates, no copy for `"once"` tasks, dates that cross a month or a year, a task finished late, completing the same task twice in a row, and tomorrow's copy staying off today's schedule.
-- **Conflicts:** the same time for different pets, the same time for the same pet, a partial overlap, back-to-back tasks (no conflict), one long task overlapping two short ones, and completed or future tasks being ignored.
+Every feature above has its own tests. See [Testing PawPal+](#-testing-pawpal) for the full list and the latest results.
 
 ## 📸 Demo Walkthrough
 
