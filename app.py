@@ -147,13 +147,40 @@ else:
             except ValueError as err:
                 st.error(str(err))
 
+    # Mark a pending task done. Scheduler.mark_task_complete() also adds the next copy of a
+    # daily or weekly task, so it appears in the table below with its new due date.
+    pending = scheduler.sort_by_time(scheduler.get_tasks(completed=False))
+    if pending:
+        with st.form("complete_task"):
+            choice = st.selectbox(
+                "Mark a task done",
+                range(len(pending)),
+                format_func=lambda i: (
+                    f"{pending[i][0].name}: {pending[i][1].description} "
+                    f"(due {pending[i][1].due_date:%b %d}, {pending[i][1].frequency})"
+                ),
+            )
+            if st.form_submit_button("Mark done"):
+                pet, task = pending[choice]
+                scheduler.mark_task_complete(pet.name, task.description)
+                # For a recurring task, the new pending copy is the next occurrence.
+                nxt = pet.find_task(task.description, pending_only=True)
+                if nxt is not None:
+                    st.success(
+                        f"Done! Next '{task.description}' for {pet.name} is due "
+                        f"{nxt.due_date:%a %b %d}."
+                    )
+                else:
+                    st.success(f"Done! '{task.description}' for {pet.name} is complete.")
+
     # Every task across all pets (via the Scheduler, which reads Owner.get_all_tasks()),
-    # sorted by start time so the list reads like a timeline.
+    # sorted by due date and start time so the list reads like a timeline.
     all_tasks = scheduler.sort_by_time(scheduler.get_tasks())
     if all_tasks:
         st.table(
             [
                 {
+                    "Due": t.due_date.strftime("%a %b %d"),
                     "Time": t.start_time.strftime("%H:%M"),
                     "Pet": p.name,
                     "Task": t.description,
@@ -177,11 +204,12 @@ st.divider()
 st.subheader("Today's Schedule")
 
 if st.button("Generate schedule"):
-    # todays_schedule() takes pending tasks in priority order (high -> low), keeps each
-    # one that still fits in available_minutes, then re-sorts the kept tasks by start time.
+    # todays_schedule() takes pending tasks due today or earlier in priority order
+    # (high -> low), keeps each one that still fits in available_minutes, then re-sorts the
+    # kept tasks by start time. Future copies of recurring tasks wait for their day.
     schedule = scheduler.todays_schedule()
     if not schedule:
-        st.info("Nothing to schedule. Add some pending tasks first.")
+        st.info("Nothing due today. Add some tasks, or check back when the next ones are due.")
     else:
         used = sum(t.duration_minutes for _, t in schedule)
         st.table(
@@ -209,11 +237,7 @@ if st.button("Generate schedule"):
                 f"Skipped {p.name}: {t.description} ({t.duration_minutes} min, "
                 f"{t.priority}) because there wasn't enough time left."
             )
-        # Scheduled tasks whose time windows overlap, even if they belong to different
-        # pets, since one owner can't do two things at once.
-        for (pa, a), (pb, b) in scheduler.find_conflicts():
-            st.error(
-                f"Time conflict: {pa.name}'s '{a.description}' at "
-                f"{a.start_time.strftime('%H:%M')} overlaps {pb.name}'s "
-                f"'{b.description}' at {b.start_time.strftime('%H:%M')}."
-            )
+        # Scheduled tasks whose time windows overlap, for the same pet or different pets,
+        # since one owner can't do two things at once. They come back as ready-made messages.
+        for warning in scheduler.conflict_warnings():
+            st.error(warning)

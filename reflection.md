@@ -32,6 +32,19 @@
 - Describe one tradeoff your scheduler makes.
 - Why is that tradeoff reasonable for this scenario?
 
+**Tradeoff: priority first, not the best fit for the time.** `todays_schedule()` is greedy. It sorts the due tasks from high to low priority and keeps each one that still fits in the owner's free minutes. It never goes back to look for a better combination. That means it can leave time unused, or fit in fewer tasks than it could have.
+
+For example, say the owner has 60 minutes and three tasks:
+- a 50-minute grooming session (medium priority)
+- two 30-minute play sessions (low priority)
+
+The scheduler keeps the grooming and skips both play sessions, so 10 minutes go unused. Picking the two play sessions instead would fill all 60 minutes and get two tasks done instead of one.
+
+**Why this is reasonable here:**
+- **Priority should win.** For a pet owner, priority means something real. A medication or a meal shouldn't be dropped so that two low-priority play sessions fit more neatly. Filling the time perfectly would mean solving a "knapsack" problem, and it could swap an important task for less important ones.
+- **It's easy to explain.** The rule is "most important first, until time runs out." The app shows that rule under the schedule, and every skipped task gets a message saying there wasn't enough time. An owner can predict and trust that.
+- **It's fast.** It is one sort and one pass. A day only has a handful of tasks, so a smarter search would add complexity without making the plan noticeably better.
+
 ---
 
 ## 3. AI Collaboration
