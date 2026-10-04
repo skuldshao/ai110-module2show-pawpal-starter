@@ -1,5 +1,6 @@
 """Tests for PawPal+ core classes. Run: python -m pytest"""
 
+import json
 from datetime import date, time, timedelta
 
 import pytest
@@ -429,3 +430,232 @@ def test_task_running_past_midnight_conflicts_with_early_morning_task():
     )
 
     assert len(scheduler.find_conflicts(TODAY)) == 1
+
+
+# --- Next available slot ---------------------------------------------------------
+
+
+def test_empty_day_gives_earliest_allowed_time():
+    scheduler = conflict_scheduler()
+
+    assert scheduler.find_next_available_slot(30, today=TODAY) == time(6, 0)
+    assert scheduler.find_next_available_slot(30, earliest="09:15", today=TODAY) == time(9, 15)
+
+
+def test_slot_skips_busy_time_and_allows_back_to_back():
+    scheduler = conflict_scheduler(
+        ("Mochi", Task("Walk", "06:00", 30)),  # 06:00-06:30
+        ("Luna", Task("Breakfast", "06:30", 10)),  # 06:30-06:40
+    )
+
+    # Starts exactly when Breakfast ends; touching end-to-start isn't a conflict.
+    assert scheduler.find_next_available_slot(15, today=TODAY) == time(6, 40)
+
+
+def test_slot_skips_a_gap_that_is_too_short():
+    scheduler = conflict_scheduler(
+        ("Mochi", Task("Walk", "07:00", 30)),  # 07:00-07:30
+        ("Luna", Task("Meds", "07:40", 5)),  # 10-minute gap before this
+        ("Luna", Task("Brush", "08:00", 15)),  # 15-minute gap before this
+    )
+
+    assert scheduler.find_next_available_slot(10, earliest="07:00", today=TODAY) == time(7, 30)
+    assert scheduler.find_next_available_slot(15, earliest="07:00", today=TODAY) == time(7, 45)
+    assert scheduler.find_next_available_slot(20, earliest="07:00", today=TODAY) == time(8, 15)
+
+
+def test_slot_inside_a_long_task_is_not_offered():
+    scheduler = conflict_scheduler(
+        ("Mochi", Task("Hike", "07:00", 120)),  # 07:00-09:00
+        ("Luna", Task("Meds", "07:30", 5)),  # inside the hike
+    )
+
+    assert scheduler.find_next_available_slot(10, earliest="07:00", today=TODAY) == time(9, 0)
+
+
+def test_slot_returns_none_when_nothing_fits_before_latest():
+    scheduler = conflict_scheduler(("Mochi", Task("Walk", "21:00", 50)))  # 21:00-21:50
+
+    assert scheduler.find_next_available_slot(15, earliest="21:00", today=TODAY) is None
+    assert scheduler.find_next_available_slot(10, earliest="21:00", today=TODAY) == time(21, 50)
+
+
+def test_slot_ignores_the_task_being_moved_and_unplanned_tasks():
+    walk = Task("Walk", "08:00", 30)
+    done = Task("Old feed", "08:30", 30, completed=True)
+    scheduler = conflict_scheduler(("Mochi", walk), ("Luna", done))
+
+    assert scheduler.find_next_available_slot(30, earliest="08:00", today=TODAY) == time(8, 30)
+    assert scheduler.find_next_available_slot(
+        30, earliest="08:00", today=TODAY, ignore=walk) == time(8, 0)
+
+
+def test_slot_respects_task_running_past_midnight():
+    scheduler = conflict_scheduler(("Mochi", Task("Night meds", "23:50", 20)))  # to 00:10
+
+    assert scheduler.find_next_available_slot(5, earliest="00:00", today=TODAY) == time(0, 10)
+
+
+def test_slot_found_by_finder_never_creates_a_conflict():
+    scheduler = conflict_scheduler(
+        ("Mochi", Task("Walk", "07:00", 30)),
+        ("Luna", Task("Meds", "07:35", 5)),
+        ("Luna", Task("Brush", "07:50", 20)),
+    )
+    slot = scheduler.find_next_available_slot(15, earliest="07:00", today=TODAY)
+
+    scheduler.owner.find_pet("Mochi").add_task(Task("Play", slot, 15, due_date=TODAY))
+
+    assert scheduler.find_conflicts(TODAY) == []
+
+
+def test_slot_rejects_non_positive_duration():
+    with pytest.raises(ValueError):
+        conflict_scheduler().find_next_available_slot(0, today=TODAY)
+
+
+# --- Persistence: save_to_json / load_from_json ---------------------------------
+
+
+def test_save_and_load_round_trip_keeps_everything(tmp_path):
+    scheduler = make_scheduler()
+    scheduler.owner.available_minutes = 75
+    scheduler.mark_task_complete("Mochi", "Dinner", today=TODAY)  # adds tomorrow's copy
+    path = tmp_path / "data.json"
+
+    scheduler.owner.save_to_json(path)
+    loaded = Owner.load_from_json(path)
+
+    # Dataclasses compare field by field, so this checks every pet and task value,
+    # including time objects, due dates and completed flags.
+    assert loaded == scheduler.owner
+    assert loaded is not scheduler.owner
+
+
+def test_loaded_owner_gives_the_same_schedule(tmp_path):
+    scheduler = make_scheduler()
+    path = tmp_path / "data.json"
+    scheduler.owner.save_to_json(path)
+
+    reloaded = Scheduler(Owner.load_from_json(path))
+
+    def plan(s):
+        return [(p.name, t.description) for p, t in s.todays_schedule()]
+
+    assert plan(reloaded) == plan(scheduler)
+    assert len(reloaded.find_conflicts()) == len(scheduler.find_conflicts())
+
+
+def test_saved_file_is_readable_json(tmp_path):
+    owner = Owner(name="Jordan")
+    pet = Pet(name="Mochi", species="dog")
+    owner.add_pet(pet)
+    pet.add_task(Task("Walk", "7:30", due_date=date(2026, 1, 31)))
+    path = tmp_path / "data.json"
+
+    owner.save_to_json(path)
+    task = json.loads(path.read_text())["pets"][0]["tasks"][0]
+
+    assert task["start_time"] == "07:30"
+    assert task["due_date"] == "2026-01-31"
+    assert not (tmp_path / "data.json.tmp").exists()
+
+
+def test_save_overwrites_previous_data(tmp_path):
+    path = tmp_path / "data.json"
+    owner = Owner(name="Jordan")
+    owner.add_pet(Pet(name="Mochi", species="dog"))
+    owner.save_to_json(path)
+
+    owner.remove_pet("Mochi")
+    owner.save_to_json(path)
+
+    assert Owner.load_from_json(path).pets == []
+
+
+def test_load_missing_file_returns_none(tmp_path):
+    assert Owner.load_from_json(tmp_path / "nope.json") is None
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "{not json",
+        '{"name": "Jordan"}',  # missing fields
+        '{"name": "J", "available_minutes": 60, "pets": [{"name": "M", "species": "dog",'
+        ' "age": 1, "tasks": [{"description": "Walk", "start_time": "25:00",'
+        ' "duration_minutes": 10, "priority": "high", "frequency": "once",'
+        ' "completed": false, "due_date": "2026-01-01"}]}]}',  # bad time
+    ],
+)
+def test_load_bad_file_raises_value_error(tmp_path, content):
+    path = tmp_path / "data.json"
+    path.write_text(content)
+
+    with pytest.raises(ValueError):
+        Owner.load_from_json(path)
+
+
+# --- Priority-based scheduling --------------------------------------------------
+
+
+@pytest.mark.parametrize("given", ["High", "HIGH", " high "])
+def test_priority_is_case_insensitive(given):
+    assert Task("Walk", "07:00", priority=given).priority == "high"
+
+
+def test_sort_by_priority_breaks_ties_by_date_then_time_then_pet():
+    yesterday = TODAY - timedelta(days=1)
+    scheduler = conflict_scheduler(
+        ("Mochi", Task("Low early", "06:00", priority="low")),
+        ("Mochi", Task("High late", "20:00", priority="high")),
+        ("Mochi", Task("High at 8 (Mochi)", "08:00", priority="high")),
+        ("Luna", Task("High at 8 (Luna)", "08:00", priority="high")),
+        ("Luna", Task("Medium", "07:00", priority="medium")),
+    )
+    overdue = Task("High overdue", "21:00", priority="high", due_date=yesterday)
+    scheduler.owner.find_pet("Luna").add_task(overdue)
+
+    ordered = [t.description for _, t in scheduler.sort_by_priority(scheduler.get_tasks())]
+
+    assert ordered == [
+        "High overdue",  # same priority: an earlier due date wins, even at a later time
+        "High at 8 (Luna)",  # same time: pet name breaks the tie
+        "High at 8 (Mochi)",
+        "High late",
+        "Medium",
+        "Low early",  # earliest time of all, but lowest priority
+    ]
+
+
+def test_todays_schedule_can_be_ordered_by_priority():
+    scheduler = conflict_scheduler(
+        ("Mochi", Task("Play", "07:00", priority="low")),
+        ("Mochi", Task("Walk", "09:00", priority="high")),
+        ("Luna", Task("Brush", "08:00", priority="medium")),
+    )
+
+    def names(order):
+        return [t.description for _, t in scheduler.todays_schedule(TODAY, order=order)]
+
+    assert names("time") == ["Play", "Brush", "Walk"]
+    assert names("priority") == ["Walk", "Brush", "Play"]
+
+
+def test_priority_order_shows_the_same_tasks_as_time_order():
+    scheduler = budget_scheduler(
+        30,
+        Task("Walk", "09:00", 20, "high"),
+        Task("Brush", "08:00", 10, "medium"),
+        Task("Play", "07:00", 15, "low"),  # doesn't fit
+    )
+    by_time = scheduler.todays_schedule(TODAY, order="time")
+    by_priority = scheduler.todays_schedule(TODAY, order="priority")
+
+    assert {id(t) for _, t in by_time} == {id(t) for _, t in by_priority}
+    assert [t.description for _, t in by_priority] == ["Walk", "Brush"]
+
+
+def test_todays_schedule_rejects_unknown_order():
+    with pytest.raises(ValueError):
+        conflict_scheduler().todays_schedule(TODAY, order="alphabetical")

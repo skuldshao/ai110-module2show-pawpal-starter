@@ -3,3 +3,6 @@ __pycache__/
 .venv_new/
 .pytest_cache/
 .DS_Store
+# Saved app data (Challenge 2)
+data.json
+data.json.tmp

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta
-from typing import List, Optional, Tuple, Union
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 # Lower rank sorts first, so "high" priority tasks come before "low" ones.
 PRIORITY_RANK = {"high": 0, "medium": 1, "low": 2}
@@ -53,9 +56,12 @@ class Task:
     due_date: date = field(default_factory=date.today)
 
     def __post_init__(self) -> None:
-        """Normalize start_time and validate priority, frequency, and duration."""
+        """Normalize start_time and priority, and validate priority, frequency, and duration."""
         # Store every start time as a time object so sorting never compares strings.
         self.start_time = parse_time(self.start_time)
+        # Accept "High", " LOW " etc. and store the lowercase key used by PRIORITY_RANK.
+        if isinstance(self.priority, str):
+            self.priority = self.priority.strip().lower()
         if self.priority not in PRIORITY_RANK:
             raise ValueError(f"priority must be one of {list(PRIORITY_RANK)}")
         if self.frequency not in FREQUENCIES:
@@ -117,6 +123,43 @@ class Task:
         # replace() copies every field (time, duration, priority, ...) except the ones given.
         return replace(self, due_date=base + step, completed=False)
 
+    def to_dict(self) -> Dict[str, Any]:
+        """Return this task as a dict of JSON-safe values.
+
+        json can't write time or date objects, so start_time becomes "HH:MM" and due_date
+        becomes an ISO string like "2026-10-04". from_dict() turns them back.
+        """
+        return {
+            "description": self.description,
+            "start_time": self.start_time.strftime("%H:%M"),
+            "duration_minutes": self.duration_minutes,
+            "priority": self.priority,
+            "frequency": self.frequency,
+            "completed": self.completed,
+            "due_date": self.due_date.isoformat(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> Task:
+        """Build a Task from a dict made by to_dict().
+
+        Goes through the normal constructor, so __post_init__ still validates the values
+        and parses the "HH:MM" start time.
+
+        Raises:
+            KeyError: If a required field is missing.
+            ValueError: If a value is invalid (bad time, priority, date, ...).
+        """
+        return cls(
+            description=data["description"],
+            start_time=data["start_time"],
+            duration_minutes=data["duration_minutes"],
+            priority=data["priority"],
+            frequency=data["frequency"],
+            completed=data["completed"],
+            due_date=date.fromisoformat(data["due_date"]),
+        )
+
 
 @dataclass
 class Pet:
@@ -157,6 +200,25 @@ class Pet:
             None,
         )
 
+    def to_dict(self) -> Dict[str, Any]:
+        """Return this pet and its tasks as a dict of JSON-safe values."""
+        return {
+            "name": self.name,
+            "species": self.species,
+            "age": self.age,
+            "tasks": [task.to_dict() for task in self.tasks],
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> Pet:
+        """Build a Pet, including its tasks, from a dict made by to_dict()."""
+        return cls(
+            name=data["name"],
+            species=data["species"],
+            age=data["age"],
+            tasks=[Task.from_dict(t) for t in data["tasks"]],
+        )
+
 
 @dataclass
 class Owner:
@@ -187,6 +249,65 @@ class Owner:
     def get_all_tasks(self) -> List[Tuple[Pet, Task]]:
         """Return every task from every pet as (pet, task) pairs, in pet order."""
         return [(pet, task) for pet in self.pets for task in pet.tasks]
+
+    # --- Persistence ---------------------------------------------------------
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Return the owner, every pet and every task as nested dicts of JSON-safe values."""
+        return {
+            "name": self.name,
+            "available_minutes": self.available_minutes,
+            "pets": [pet.to_dict() for pet in self.pets],
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> Owner:
+        """Build an Owner, with all pets and tasks, from a dict made by to_dict()."""
+        return cls(
+            name=data["name"],
+            available_minutes=data["available_minutes"],
+            pets=[Pet.from_dict(p) for p in data["pets"]],
+        )
+
+    def save_to_json(self, path: Union[str, Path] = "data.json") -> None:
+        """Save the owner, pets and tasks to a JSON file, replacing what was there.
+
+        Writes to a temporary file first and then swaps it in, so a crash halfway through
+        never leaves a half-written data.json behind.
+
+        Args:
+            path: Where to save. Defaults to "data.json" in the current folder.
+        """
+        path = Path(path)
+        tmp = path.with_name(path.name + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            # ensure_ascii=False keeps names like "Café" readable in the file.
+            json.dump(self.to_dict(), f, indent=2, ensure_ascii=False)
+        os.replace(tmp, path)  # replaces the old file in one step
+
+    @classmethod
+    def load_from_json(cls, path: Union[str, Path] = "data.json") -> Optional[Owner]:
+        """Load an owner, with all pets and tasks, from a file made by save_to_json().
+
+        Args:
+            path: The file to read. Defaults to "data.json" in the current folder.
+
+        Returns:
+            The loaded Owner, or None if the file doesn't exist yet (e.g. the first run).
+
+        Raises:
+            ValueError: If the file isn't valid JSON or is missing fields or has bad values.
+        """
+        path = Path(path)
+        if not path.exists():
+            return None
+        try:
+            with open(path, encoding="utf-8") as f:
+                return cls.from_dict(json.load(f))
+        except (KeyError, TypeError, ValueError) as err:
+            # json.JSONDecodeError is a ValueError. Report every problem the same way so the
+            # caller only has to catch one exception type.
+            raise ValueError(f"Could not load {path}: {err!r}") from err
 
 
 class Scheduler:
@@ -255,10 +376,27 @@ class Scheduler:
 
     @staticmethod
     def sort_by_priority(tasks: List[Tuple[Pet, Task]]) -> List[Tuple[Pet, Task]]:
-        """Return a new list ordered high → low priority, breaking ties by earlier start time."""
+        """Return the tasks ordered by priority first, then by time, without changing the original.
+
+        High comes before medium before low. Within the same priority, tasks are ordered
+        like sort_by_time(): due date first (so an overdue task beats today's), then start
+        time, then pet name, so the result is always the same.
+
+        Args:
+            tasks: (pet, task) pairs, for example from get_tasks().
+
+        Returns:
+            A new, sorted list of the same (pet, task) pairs.
+        """
+        # Same key as sort_by_time(), with priority moved to the front.
         return sorted(
-            tasks, key=lambda pt: (
-                PRIORITY_RANK[pt[1].priority], pt[1].start_time)
+            tasks,
+            key=lambda pt: (
+                PRIORITY_RANK[pt[1].priority],
+                pt[1].due_date,
+                pt[1].start_time,
+                pt[0].name,
+            ),
         )
 
     def due_tasks(self, today: Optional[date] = None) -> List[Tuple[Pet, Task]]:
@@ -276,7 +414,9 @@ class Scheduler:
         today = today or date.today()
         return [(p, t) for p, t in self.get_tasks(completed=False) if t.due_date <= today]
 
-    def todays_schedule(self, today: Optional[date] = None) -> List[Tuple[Pet, Task]]:
+    def todays_schedule(
+        self, today: Optional[date] = None, order: str = "time"
+    ) -> List[Tuple[Pet, Task]]:
         """Build today's plan from the tasks that are due.
 
         Tasks are taken from high to low priority, and each one is kept only if it still fits
@@ -285,10 +425,17 @@ class Scheduler:
 
         Args:
             today: The day to plan for. Defaults to date.today().
+            order: How to order the chosen tasks: "time" for a timeline (the default), or
+                "priority" for high → low, then by time, as a "most important first" list.
 
         Returns:
-            The chosen (pet, task) pairs, ordered by start time.
+            The chosen (pet, task) pairs in the requested order.
+
+        Raises:
+            ValueError: If order is not "time" or "priority".
         """
+        if order not in ("time", "priority"):
+            raise ValueError('order must be "time" or "priority"')
         chosen: List[Tuple[Pet, Task]] = []
         minutes_used = 0
         # Greedy: take the most important due tasks first. A task that doesn't fit is
@@ -297,8 +444,8 @@ class Scheduler:
             if minutes_used + task.duration_minutes <= self.owner.available_minutes:
                 chosen.append((pet, task))
                 minutes_used += task.duration_minutes
-        # Priority decided *what* gets done; time decides the order it's shown in.
-        return self.sort_by_time(chosen)
+        # Priority always decides *what* gets done; order only decides how it's shown.
+        return self.sort_by_priority(chosen) if order == "priority" else self.sort_by_time(chosen)
 
     def skipped_tasks(self, today: Optional[date] = None) -> List[Tuple[Pet, Task]]:
         """Return the due tasks that didn't make today's plan because the time budget ran out.
@@ -385,6 +532,64 @@ class Scheduler:
                 f"'{b.description}' {b.time_window()} {how}."
             )
         return warnings
+
+    def find_next_available_slot(
+        self,
+        duration_minutes: int,
+        earliest: Union[time, str] = "06:00",
+        latest: Union[time, str] = "22:00",
+        today: Optional[date] = None,
+        ignore: Optional[Task] = None,
+    ) -> Optional[time]:
+        """Find the earliest start time when a task of this length fits without a conflict.
+
+        Busy time comes from todays_schedule(), the same tasks find_conflicts() checks, so a
+        task placed at the returned time never produces a conflict warning. Uses a sweep over
+        the busy windows sorted by start: the candidate start time is pushed past each window
+        it would overlap, and the first gap long enough wins. Back-to-back is allowed, matching
+        find_conflicts(): a 15-minute task can start exactly when the previous one ends.
+
+        Args:
+            duration_minutes: How long the new task takes. Must be positive.
+            earliest: The first acceptable start time (time or "HH:MM"). Defaults to 06:00.
+            latest: The task must finish by this time (time or "HH:MM"). Defaults to 22:00.
+            today: The day to plan for. Defaults to date.today().
+            ignore: A task to leave out of the busy time, e.g. the task being moved, so it
+                doesn't block its own new slot.
+
+        Returns:
+            The earliest free start time, or None if no gap between earliest and latest
+            is long enough.
+
+        Raises:
+            ValueError: If duration_minutes is not positive, or earliest/latest are not
+                valid times.
+        """
+        if duration_minutes <= 0:
+            raise ValueError("duration_minutes must be positive")
+        start, end = parse_time(earliest), parse_time(latest)
+        candidate = start.hour * 60 + start.minute
+        limit = end.hour * 60 + end.minute
+
+        # Busy windows as (start, end) minutes after midnight. A task that runs past midnight
+        # also blocks the start of the morning (23:50-00:10 blocks 00:00-00:10).
+        busy = []
+        for _, task in self.todays_schedule(today):
+            if task is ignore:
+                continue
+            busy.append((task.start_minute, task.end_minute))
+            if task.end_minute > 24 * 60:
+                busy.append((0, task.end_minute - 24 * 60))
+
+        for busy_start, busy_end in sorted(busy):
+            if busy_start >= candidate + duration_minutes:
+                break  # the gap before this window is long enough; later windows start later
+            # This window overlaps (or comes before) the candidate, so start after it instead.
+            candidate = max(candidate, busy_end)
+
+        if candidate + duration_minutes > limit:
+            return None
+        return time(candidate // 60, candidate % 60)
 
     # --- Managing ------------------------------------------------------------
 

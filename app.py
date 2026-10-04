@@ -1,11 +1,13 @@
 from datetime import time
+from pathlib import Path
 
 import streamlit as st
 
+from formatting import STATUS_BADGE, priority_badge, status_badge, task_label
 from pawpal_system import Owner, Pet, Scheduler, Task
 
-# Colored dots make priority scannable in the tables.
-PRIORITY_BADGE = {"high": "🔴 high", "medium": "🟡 medium", "low": "🟢 low"}
+# Saved next to app.py, so the same file is used no matter which folder the app starts from.
+DATA_FILE = Path(__file__).parent / "data.json"
 
 st.set_page_config(page_title="PawPal+", page_icon="🐾", layout="centered")
 
@@ -49,20 +51,40 @@ st.divider()
 # The owner's name and daily time budget. available_minutes is what the Scheduler
 # uses to decide how many tasks fit into today's plan.
 
-st.subheader("Owner")
-owner_name = st.text_input("Owner name", value="Jordan")
-available_minutes = st.number_input(
-    "Minutes available today", min_value=0, max_value=1440, value=90, step=5
-)
-
 # Streamlit reruns this script on every interaction, so keep one Owner in session_state.
-# Only create it the first time; afterwards reuse the stored instance and its pets/tasks.
+# The first time, load it from data.json so pets and tasks survive restarting the app;
+# afterwards reuse the stored instance. Owner.load_from_json() returns None on the first
+# run (no file yet), and raises ValueError if the file is damaged.
 if "owner" not in st.session_state:
-    st.session_state.owner = Owner(name=owner_name)
+    try:
+        st.session_state.owner = Owner.load_from_json(DATA_FILE) or Owner(
+            name="Jordan", available_minutes=90
+        )
+    except ValueError as err:
+        st.session_state.owner = Owner(name="Jordan", available_minutes=90)
+        st.error(f"Couldn't read saved data, starting fresh. {err}")
 owner = st.session_state.owner
-# Copy the latest widget values onto the stored Owner so edits take effect immediately.
-owner.name = owner_name
-owner.available_minutes = int(available_minutes)
+
+
+def save() -> None:
+    """Write the owner, pets and tasks to data.json. Called after every change."""
+    owner.save_to_json(DATA_FILE)
+
+
+st.subheader("Owner")
+# The widgets start from the loaded Owner, so a returning user sees their own name and time.
+owner_name = st.text_input("Owner name", value=owner.name)
+available_minutes = st.number_input(
+    "Minutes available today", min_value=0, max_value=1440,
+    value=owner.available_minutes, step=5,
+)
+# Copy the latest widget values onto the stored Owner so edits take effect immediately,
+# and save only when something actually changed.
+if (owner_name, int(available_minutes)) != (owner.name, owner.available_minutes):
+    owner.name = owner_name
+    owner.available_minutes = int(available_minutes)
+    save()
+st.caption(f"💾 Pets and tasks are saved automatically to `{DATA_FILE.name}`.")
 
 # The Scheduler holds no data of its own; it reads everything through
 # owner.get_all_tasks(), so it is cheap to rebuild on every rerun and always sees every pet.
@@ -95,6 +117,7 @@ with st.form("add_pet", clear_on_submit=True):
             # multiple pets. Because the Owner lives in session_state, the new Pet survives
             # the rerun that Streamlit triggers right after this button click.
             owner.add_pet(Pet(name=pet_name.strip(), species=species, age=int(age)))
+            save()
             st.success(f"Added {pet_name.strip()}!")
 
 # Drawn after the form, so on the rerun triggered by "Add pet" this table already
@@ -146,6 +169,7 @@ else:
                         frequency=frequency,
                     )
                 )
+                save()
                 st.success(f"Added '{description.strip()}' for {task_pet}.")
             except ValueError as err:
                 st.error(str(err))
@@ -159,13 +183,14 @@ else:
                 "Mark a task done",
                 range(len(pending)),
                 format_func=lambda i: (
-                    f"{pending[i][0].name}: {pending[i][1].description} "
+                    f"{pending[i][0].name}: {task_label(pending[i][1])} "
                     f"(due {pending[i][1].due_date:%b %d}, {pending[i][1].frequency})"
                 ),
             )
             if st.form_submit_button("Mark done"):
                 pet, task = pending[choice]
                 scheduler.mark_task_complete(pet.name, task.description)
+                save()
                 # For a recurring task, the new pending copy is the next occurrence.
                 nxt = pet.find_task(task.description, pending_only=True)
                 if nxt is not None:
@@ -204,18 +229,21 @@ else:
                     "Due": t.due_date.strftime("%a %b %d"),
                     "Time": t.start_time.strftime("%H:%M"),
                     "Pet": p.name,
-                    "Task": t.description,
+                    "Task": task_label(t),
                     "Minutes": t.duration_minutes,
-                    "Priority": PRIORITY_BADGE[t.priority],
+                    "Priority": priority_badge(t.priority),
                     "Frequency": t.frequency,
-                    "Done": "✅" if t.completed else "",
+                    "Status": status_badge(t),
                 }
                 for p, t in filtered
             ]
         )
         st.caption(
             f"Showing {len(filtered)} of {len(scheduler.get_tasks())} tasks, "
-            f"sorted by {sort_choice.lower()}."
+            f"sorted by {sort_choice.lower()}.  \n"
+            # Legend for the badges, built from the same dicts the badges use.
+            f"Priority: {' · '.join(priority_badge(p) for p in ('high', 'medium', 'low'))}"
+            f"  |  Status: {' · '.join(STATUS_BADGE.values())}"
         )
     elif scheduler.get_tasks():
         st.info("No tasks match these filters.")
@@ -232,9 +260,14 @@ st.divider()
 st.subheader("Today's Schedule")
 
 # todays_schedule() takes pending tasks due today or earlier in priority order
-# (high -> low), keeps each one that still fits in available_minutes, then re-sorts the
-# kept tasks by start time. Future copies of recurring tasks wait for their day.
-schedule = scheduler.todays_schedule()
+# (high -> low) and keeps each one that still fits in available_minutes. Future copies of
+# recurring tasks wait for their day. The order choice only changes how the kept tasks are
+# listed: as a timeline, or most important first (priority, then time).
+plan_order = st.radio(
+    "Show plan by", ["Time", "Priority"], horizontal=True,
+    help="Priority lists high → low, then by time. Either way, priority decides what fits.",
+)
+schedule = scheduler.todays_schedule(order=plan_order.lower())
 skipped = scheduler.skipped_tasks()
 conflicts = scheduler.find_conflicts()
 
@@ -249,22 +282,40 @@ else:
     m1.metric("Tasks planned", len(schedule))
     m2.metric("Minutes used", f"{used} / {owner.available_minutes}")
     m3.metric("Conflicts", len(conflicts))
+    # Same idea as the CLI's budget bar: how much of today's free time the plan uses.
+    st.progress(
+        min(used / owner.available_minutes, 1.0) if owner.available_minutes else 0.0,
+        text=f"Time budget: {used} of {owner.available_minutes} min",
+    )
 
     # Conflicts come first: they are the one problem the owner must fix before the day starts.
-    # Each one gets the Scheduler's message plus a concrete fix (move the later task so it
-    # starts when the earlier one ends).
+    # Each one gets the Scheduler's message plus a concrete fix: the next free slot for the
+    # later task, found by Scheduler.find_next_available_slot() so the fix can't clash with
+    # some other task.
     if conflicts:
         st.warning(
             f"**{len(conflicts)} timing conflict{'s' if len(conflicts) > 1 else ''}:** "
             "you can't be in two places at once. Move one task in each pair below."
         )
         for warning, ((pet_a, a), (pet_b, b)) in zip(scheduler.conflict_warnings(), conflicts):
-            end = a.end_minute % (24 * 60)
-            st.markdown(
-                f"- {warning.replace('⚠️', '').strip()}  \n"
-                f"  💡 Try starting {pet_b.name}'s '{b.description}' at "
-                f"**{end // 60:02d}:{end % 60:02d}**, when '{a.description}' ends."
+            # Search from when the earlier task ends; ignore=b so b doesn't block its own move.
+            # A task ending past midnight leaves no room later today, so there's no suggestion.
+            slot = (
+                scheduler.find_next_available_slot(
+                    b.duration_minutes,
+                    earliest=time(a.end_minute // 60, a.end_minute % 60),
+                    latest=time(23, 59),
+                    ignore=b,
+                )
+                if a.end_minute < 24 * 60
+                else None
             )
+            tip = (
+                f"💡 Next free slot for {pet_b.name}'s '{b.description}': **{slot:%H:%M}**."
+                if slot
+                else f"💡 No free slot left today for {pet_b.name}'s '{b.description}'."
+            )
+            st.markdown(f"- {warning.replace('⚠️', '').strip()}  \n  {tip}")
     else:
         st.success("No overlapping tasks. Your plan is conflict-free.")
 
@@ -275,19 +326,40 @@ else:
             {
                 "Time": t.time_window(),
                 "Pet": p.name,
-                "Task": t.description,
+                "Task": task_label(t),
                 "Minutes": t.duration_minutes,
-                "Priority": PRIORITY_BADGE[t.priority],
-                "Conflict": "⚠️" if id(t) in clashing else "",
+                "Priority": priority_badge(t.priority),
+                "Clash": "⚡" if id(t) in clashing else "",
             }
             for p, t in schedule
         ]
     )
 
+    # Next available slot: the earliest gap in today's plan that fits a task of this length,
+    # so the owner can add something new without creating a conflict.
+    with st.expander("🔎 Find a free slot"):
+        scol1, scol2, scol3 = st.columns(3)
+        with scol1:
+            slot_minutes = st.number_input(
+                "Task length (minutes)", min_value=1, max_value=240, value=20, key="slot_len"
+            )
+        with scol2:
+            slot_from = st.time_input("Not before", value=time(6, 0), step=900)
+        with scol3:
+            slot_until = st.time_input("Finish by", value=time(22, 0), step=900)
+        slot = scheduler.find_next_available_slot(
+            int(slot_minutes), earliest=slot_from, latest=slot_until
+        )
+        if slot:
+            st.success(f"The next free {int(slot_minutes)}-minute slot starts at **{slot:%H:%M}**.")
+        else:
+            st.warning("No gap that long between those times. Try a shorter task or a wider window.")
+
     # Explain the plan in plain language so the user knows how tasks were chosen.
     st.caption(
         "Why this plan: pending tasks were picked from high to low priority "
-        "until your available time ran out, then ordered by start time."
+        "until your available time ran out, then ordered by "
+        + ("start time." if plan_order == "Time" else "priority, then start time.")
     )
 
 # Pending tasks that didn't fit the time budget (usually lower-priority ones).
@@ -298,9 +370,9 @@ if skipped:
                 {
                     "Time": t.start_time.strftime("%H:%M"),
                     "Pet": p.name,
-                    "Task": t.description,
+                    "Task": task_label(t),
                     "Minutes": t.duration_minutes,
-                    "Priority": PRIORITY_BADGE[t.priority],
+                    "Priority": priority_badge(t.priority),
                 }
                 for p, t in skipped
             ]
