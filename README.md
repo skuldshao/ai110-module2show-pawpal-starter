@@ -59,6 +59,22 @@ I built the core logic for PawPal+ in `pawpal_system.py` as four classes that bu
 
 Together, they work like this: `Owner` → `Pet` → `Task` holds the data, and `Scheduler` sits on top of `Owner` and makes the decisions. `main.py` is my terminal testing ground. It creates an owner with two pets and eight tasks (added out of order on purpose), completes a few of them, and prints each sorted and filtered view, then today's schedule and any conflicts. `tests/test_pawpal.py` has 44 tests covering every feature in the Smarter Scheduling section below, plus edge cases like empty data and tasks that run past midnight.
 
+## ✨ Features
+
+Every feature below is a method on `Task` or `Scheduler` in `pawpal_system.py`, and each one is covered by tests in `tests/test_pawpal.py`.
+
+- **Sorting by time.** `Scheduler.sort_by_time()` orders tasks by due date, then start time, then priority (high first), then pet name. So the list reads like a timeline, and ties always come out in the same order. Start times are turned into real `time` objects by `parse_time()` when a task is created, so `"10:00"` never sorts before `"7:30"`.
+- **Sorting by priority.** `Scheduler.sort_by_priority()` orders tasks high → medium → low and breaks ties by earlier start time. The scheduler uses this order to decide which tasks to keep first.
+- **Filtering by pet and status.** `Scheduler.get_tasks(pet_name, completed)` keeps only the tasks that pass every filter given, in one pass. Pet names ignore case and extra spaces, and an unknown pet gives an empty list instead of an error.
+- **Due-date filtering.** `Scheduler.due_tasks()` keeps pending tasks due today or earlier. Overdue tasks stay on the list until they're done, and future copies of recurring tasks wait for their day.
+- **Priority-first daily plan within a time budget.** `Scheduler.todays_schedule()` is a greedy algorithm. It takes due tasks from high to low priority and keeps each one that still fits in the owner's free minutes. If a long task doesn't fit, a shorter one further down the list can still be picked. The kept tasks are then shown in start-time order.
+- **Skipped-task report.** `Scheduler.skipped_tasks()` lists the due tasks that didn't fit, so the owner can see what was left out and why.
+- **Conflict warnings.** `Scheduler.find_conflicts()` sorts today's plan by start time, then walks through it with a list of the tasks still running, to find every pair whose times overlap. That covers the same pet or two different pets, and tasks that run past midnight. Back-to-back tasks don't count. `Scheduler.conflict_warnings()` turns each pair into a readable message instead of raising an error.
+- **Daily and weekly recurrence.** `Scheduler.mark_task_complete()` marks the pending task done, keeps it as history, and adds the next copy from `Task.next_occurrence()`. That copy is due in 1 day for a daily task and in 7 days for a weekly one, using `timedelta`, so month and year boundaries are handled. If a task is finished late, the next copy counts from today, so it isn't overdue straight away.
+- **Input validation.** `Task` rejects an unknown priority or frequency, a zero or negative duration, and a bad time like `"25:00"` as soon as it's created. The app shows these as error messages instead of crashing.
+
+The final class diagram is in [`diagrams/uml_final.mmd`](diagrams/uml_final.mmd) ([PNG](diagrams/uml_final.png)).
+
 ## 🖥️ Sample Output
 
 Output from running `python main.py` (the end of it, after the sorted and filtered lists):
@@ -171,7 +187,7 @@ I'm not giving it 5 stars, for these reasons:
 
 - **The Streamlit UI isn't tested automatically.** My tests check `pawpal_system.py`, but I've only checked `app.py` by clicking through it by hand.
 - **The scheduler is greedy, not optimal.** It always takes the highest-priority task that fits, so it sometimes leaves time unused that a different mix of lower-priority tasks could fill. The tests confirm it behaves the way I designed it, but that design has limits.
-- **It plans one day at a time.** It doesn't plan ahead across a week, and it only reports conflicts without suggesting a fix.
+- **It plans one day at a time.** It doesn't plan ahead across a week, and it never moves conflicting tasks on its own. The app suggests a new start time, but doesn't check whether that time clashes with a third task.
 - **Nothing is saved.** Tasks live in memory, so there's nothing yet to test around saving and loading data.
 
 ## 📐 Smarter Scheduling
@@ -222,7 +238,7 @@ Both filters are checked in a single pass over the list, inside one list compreh
 
 `due_tasks()` adds a filter by date. It returns pending tasks whose `due_date` is today or earlier. That keeps overdue tasks on the list until they're done, and leaves out future copies of recurring tasks until their day comes. `todays_schedule()`, `skipped_tasks()` and `find_conflicts()` all start from `due_tasks()`, so tomorrow's walk never shows up in today's plan.
 
-In `main.py` I print every filter: all tasks, Mochi only, completed only, and Luna's pending tasks. In the app, the "Mark a task done" dropdown uses `get_tasks(completed=False)`.
+In `main.py` I print every filter: all tasks, Mochi only, completed only, and Luna's pending tasks. In the app, the task list has **Filter by pet** and **Filter by status** dropdowns that call `get_tasks()`, and the "Mark a task done" dropdown uses `get_tasks(completed=False)`.
 
 ### 3. Conflict detection
 
@@ -248,9 +264,9 @@ Because the list is sorted, a task that has ended can never overlap anything lat
 ⚠️  Conflict (Luna & Mochi): 'Thyroid medication' 08:15-08:20 and 'Brush teeth' 08:15-08:25 start at the same time.
 ```
 
-Nothing is ever raised. If there are no conflicts, the method returns an empty list, so the caller just prints whatever comes back. `main.py` prints these lines under the schedule, and the Streamlit app shows each one as a red warning after "Generate schedule."
+Nothing is ever raised. If there are no conflicts, the method returns an empty list, so the caller just prints whatever comes back. `main.py` prints these lines under the schedule. The Streamlit app shows them in a yellow warning above the schedule, marks the conflicting rows with ⚠️, and suggests a start time for the later task (when the earlier one ends).
 
-**What it doesn't do.** It reports conflicts but doesn't fix them, because I want the owner to decide what to move. It only checks tasks on today's plan, so completed tasks, tasks skipped for time and future recurring copies are ignored. It does handle a late-night task that runs past midnight: a 23:50–00:10 task is still flagged against one at 00:05.
+**What it doesn't do.** It reports conflicts but doesn't fix them, because I want the owner to decide what to move. The app only suggests a new time. It only checks tasks on today's plan, so completed tasks, tasks skipped for time and future recurring copies are ignored. It does handle a late-night task that runs past midnight: a 23:50–00:10 task is still flagged against one at 00:05.
 
 ### 4. Recurring tasks
 
@@ -279,12 +295,107 @@ Every feature above has its own tests. See [Testing PawPal+](#-testing-pawpal) f
 
 ## 📸 Demo Walkthrough
 
-Describe your app in numbered steps so a reader can follow along without watching a video:
+Start the app with:
 
-1. <!-- Describe this step -->
-2. <!-- Describe this step -->
-3. <!-- Describe this step -->
-4. <!-- Describe this step -->
-5. <!-- Add more steps as needed -->
+```bash
+streamlit run app.py
+```
 
-**Screenshot or video** _(optional)_: <!-- Insert a screenshot or link to a demo video here -->
+### What you can do in the app
+
+The page is one column with four sections, from top to bottom:
+
+| Section | What you can do |
+| --- | --- |
+| **Owner** | Enter your name and how many minutes you have free today. Changing the minutes updates the schedule right away. |
+| **Pets** | Add a pet with a name, species and age. A table lists your pets and how many tasks each one has. Blank and duplicate names are rejected with an error. |
+| **Tasks** | Add a task for a pet with a start time, duration, priority and frequency (once, daily or weekly). Mark a pending task done. Browse every task with **Filter by pet**, **Filter by status** (All, Pending or Done) and **Sort by** (Time or Priority). |
+| **Today's Schedule** | See today's plan with summary numbers (tasks planned, minutes used, conflicts), any conflict warnings with a suggested fix, the plan table, and an expander listing tasks that didn't fit. |
+
+### Example workflow
+
+1. **Set up the owner.** Keep the name "Jordan" and set **Minutes available today** to 60.
+2. **Add two pets.** Add Mochi (dog, 3) and Luna (cat, 5). Both appear in the pets table with 0 tasks.
+3. **Schedule some tasks.**
+   - Mochi: "Morning walk" at 08:00, 30 min, high, daily.
+   - Luna: "Breakfast" at 08:15, 10 min, medium, daily.
+   - Luna: "Grooming" at 10:00, 45 min, low, once.
+4. **Browse the task list.** All three tasks appear in time order. Switch **Sort by** to Priority, and Morning walk moves to the top while Grooming moves to the bottom. Set **Filter by pet** to Luna to see only her two tasks.
+5. **Check today's schedule.** The plan keeps Morning walk and Breakfast (40 of 60 minutes). Grooming doesn't fit in the 20 minutes left, so it appears under **Skipped today**.
+6. **Read the conflict warning.** A yellow warning says there is 1 timing conflict, because Luna's Breakfast at 08:15 starts during Mochi's 08:00-08:30 walk. Both rows are marked ⚠️ in the table, and the warning suggests starting Breakfast at **08:30**, when the walk ends. The app can't edit or delete tasks yet, so in practice you'd use that time when you schedule Breakfast.
+7. **Mark a task done.** Choose Mochi's Morning walk under **Mark a task done**. The app says "Done! Next 'Morning walk' for Mochi is due" tomorrow, because it's a daily task. The task list now shows the finished walk with ✅ and a new pending copy dated tomorrow.
+8. **Watch the schedule update.** With the walk done, the conflict is gone and a green "No overlapping tasks" message appears. Breakfast and Grooming now fit together (55 of 60 minutes), so Grooming moves from **Skipped today** into the plan.
+
+### Scheduler behaviors you can see in the app
+
+- **Sorting:** the task list uses `sort_by_time()` or `sort_by_priority()`, depending on **Sort by**. The schedule always uses time order.
+- **Filtering:** the pet and status filters call `get_tasks(pet_name, completed)`. The "Mark a task done" list uses `get_tasks(completed=False)`.
+- **Planning within the time budget:** `todays_schedule()` builds the plan, and `skipped_tasks()` fills the **Skipped today** list. Raising the available minutes brings those tasks back into the plan.
+- **Conflict warnings:** `find_conflicts()` and `conflict_warnings()` drive the warning banner, the ⚠️ column and the suggested start times.
+- **Recurrence:** `mark_task_complete()` adds the next daily or weekly copy, which you can see in the **Due** column.
+
+### Sample CLI output
+
+`main.py` runs the same classes without the UI. It creates an owner with two pets and eight tasks (added out of order on purpose), completes three of them, then prints each sorted and filtered view, today's schedule and any conflicts. Output from `python main.py`:
+
+```
+All tasks (insertion order):
+  Sun Oct 04 18:00  Mochi  Dinner               high   pending
+  Sun Oct 04 16:00  Mochi  Fetch in the yard    low    done
+  Sun Oct 04 07:30  Mochi  Morning walk         high   pending
+  Sun Oct 04 08:15  Mochi  Brush teeth          medium pending
+  Sun Oct 04 07:30  Mochi  Flea treatment       high   pending
+  Sun Oct 04 19:30  Luna   Brush fur            medium done
+  Sun Oct 04 08:15  Luna   Thyroid medication   high   pending
+  Sun Oct 04 08:00  Luna   Breakfast            high   done
+  Mon Oct 05 08:00  Luna   Breakfast            high   pending
+  Sun Oct 11 19:30  Luna   Brush fur            medium pending
+
+All tasks sorted by time:
+  Sun Oct 04 07:30  Mochi  Morning walk         high   pending
+  Sun Oct 04 07:30  Mochi  Flea treatment       high   pending
+  Sun Oct 04 08:00  Luna   Breakfast            high   done
+  Sun Oct 04 08:15  Luna   Thyroid medication   high   pending
+  Sun Oct 04 08:15  Mochi  Brush teeth          medium pending
+  Sun Oct 04 16:00  Mochi  Fetch in the yard    low    done
+  Sun Oct 04 18:00  Mochi  Dinner               high   pending
+  Sun Oct 04 19:30  Luna   Brush fur            medium done
+  Mon Oct 05 08:00  Luna   Breakfast            high   pending
+  Sun Oct 11 19:30  Luna   Brush fur            medium pending
+
+Mochi's tasks:
+  Sun Oct 04 07:30  Mochi  Morning walk         high   pending
+  Sun Oct 04 07:30  Mochi  Flea treatment       high   pending
+  Sun Oct 04 08:15  Mochi  Brush teeth          medium pending
+  Sun Oct 04 16:00  Mochi  Fetch in the yard    low    done
+  Sun Oct 04 18:00  Mochi  Dinner               high   pending
+
+Completed tasks:
+  Sun Oct 04 16:00  Mochi  Fetch in the yard    low    done
+  Sun Oct 04 19:30  Luna   Brush fur            medium done
+  Sun Oct 04 08:00  Luna   Breakfast            high   done
+
+Luna's pending tasks:
+  Sun Oct 04 08:15  Luna   Thyroid medication   high   pending
+  Mon Oct 05 08:00  Luna   Breakfast            high   pending
+  Sun Oct 11 19:30  Luna   Brush fur            medium pending
+
+
+🐾 Today's Schedule for Jordan
+============================================================
+Time   Pet     Task                  Length   Priority
+------------------------------------------------------------
+07:30  Mochi   Morning walk          30 min   high
+07:30  Mochi   Flea treatment        5 min    high
+08:15  Luna    Thyroid medication    5 min    high
+08:15  Mochi   Brush teeth           10 min   medium
+18:00  Mochi   Dinner                10 min   high
+------------------------------------------------------------
+Total: 60 of 90 available minutes
+
+Conflicts:
+  ⚠️  Conflict (same pet: Mochi): 'Morning walk' 07:30-08:00 and 'Flea treatment' 07:30-07:35 start at the same time.
+  ⚠️  Conflict (Luna & Mochi): 'Thyroid medication' 08:15-08:20 and 'Brush teeth' 08:15-08:25 start at the same time.
+```
+
+Breakfast and Brush fur each appear twice: once as the finished copy and once as the next one (tomorrow and next week). Fetch in the yard is a "once" task, so it doesn't come back.

@@ -4,6 +4,9 @@ import streamlit as st
 
 from pawpal_system import Owner, Pet, Scheduler, Task
 
+# Colored dots make priority scannable in the tables.
+PRIORITY_BADGE = {"high": "🔴 high", "medium": "🟡 medium", "low": "🟢 low"}
+
 st.set_page_config(page_title="PawPal+", page_icon="🐾", layout="centered")
 
 st.title("🐾 PawPal+")
@@ -173,10 +176,28 @@ else:
                 else:
                     st.success(f"Done! '{task.description}' for {pet.name} is complete.")
 
-    # Every task across all pets (via the Scheduler, which reads Owner.get_all_tasks()),
-    # sorted by due date and start time so the list reads like a timeline.
-    all_tasks = scheduler.sort_by_time(scheduler.get_tasks())
-    if all_tasks:
+    # --- Browse tasks: filter and sort --------------------------------------------
+    # The filters map straight onto Scheduler.get_tasks(pet_name, completed), and the sort
+    # choice picks Scheduler.sort_by_time() or Scheduler.sort_by_priority().
+    st.markdown("#### All tasks")
+    fcol1, fcol2, fcol3 = st.columns(3)
+    with fcol1:
+        pet_filter = st.selectbox("Filter by pet", ["All pets"] + [p.name for p in owner.pets])
+    with fcol2:
+        status_filter = st.selectbox("Filter by status", ["All", "Pending", "Done"])
+    with fcol3:
+        sort_choice = st.selectbox("Sort by", ["Time", "Priority"])
+
+    filtered = scheduler.get_tasks(
+        pet_name=None if pet_filter == "All pets" else pet_filter,
+        completed={"All": None, "Pending": False, "Done": True}[status_filter],
+    )
+    if sort_choice == "Time":
+        filtered = scheduler.sort_by_time(filtered)
+    else:
+        filtered = scheduler.sort_by_priority(filtered)
+
+    if filtered:
         st.table(
             [
                 {
@@ -185,33 +206,93 @@ else:
                     "Pet": p.name,
                     "Task": t.description,
                     "Minutes": t.duration_minutes,
-                    "Priority": t.priority,
+                    "Priority": PRIORITY_BADGE[t.priority],
                     "Frequency": t.frequency,
                     "Done": "✅" if t.completed else "",
                 }
-                for p, t in all_tasks
+                for p, t in filtered
             ]
         )
+        st.caption(
+            f"Showing {len(filtered)} of {len(scheduler.get_tasks())} tasks, "
+            f"sorted by {sort_choice.lower()}."
+        )
+    elif scheduler.get_tasks():
+        st.info("No tasks match these filters.")
     else:
         st.info("No tasks yet. Add one above.")
 
 st.divider()
 
 # --- Build schedule --------------------------------------------------------------
-# Runs the Scheduler's planning logic and explains the result: what was scheduled,
-# what was skipped for lack of time, and which tasks overlap.
+# Runs the Scheduler's planning logic and explains the result: which tasks overlap,
+# what was scheduled, and what was skipped for lack of time. It is rebuilt on every rerun,
+# so it updates as soon as a task is added or marked done.
 
 st.subheader("Today's Schedule")
 
-if st.button("Generate schedule"):
-    # todays_schedule() takes pending tasks due today or earlier in priority order
-    # (high -> low), keeps each one that still fits in available_minutes, then re-sorts the
-    # kept tasks by start time. Future copies of recurring tasks wait for their day.
-    schedule = scheduler.todays_schedule()
-    if not schedule:
-        st.info("Nothing due today. Add some tasks, or check back when the next ones are due.")
+# todays_schedule() takes pending tasks due today or earlier in priority order
+# (high -> low), keeps each one that still fits in available_minutes, then re-sorts the
+# kept tasks by start time. Future copies of recurring tasks wait for their day.
+schedule = scheduler.todays_schedule()
+skipped = scheduler.skipped_tasks()
+conflicts = scheduler.find_conflicts()
+
+if not schedule:
+    if skipped:
+        st.warning("None of today's tasks fit in your available time. Try adding more minutes.")
     else:
-        used = sum(t.duration_minutes for _, t in schedule)
+        st.info("Nothing due today. Add some tasks, or check back when the next ones are due.")
+else:
+    used = sum(t.duration_minutes for _, t in schedule)
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Tasks planned", len(schedule))
+    m2.metric("Minutes used", f"{used} / {owner.available_minutes}")
+    m3.metric("Conflicts", len(conflicts))
+
+    # Conflicts come first: they are the one problem the owner must fix before the day starts.
+    # Each one gets the Scheduler's message plus a concrete fix (move the later task so it
+    # starts when the earlier one ends).
+    if conflicts:
+        st.warning(
+            f"**{len(conflicts)} timing conflict{'s' if len(conflicts) > 1 else ''}:** "
+            "you can't be in two places at once. Move one task in each pair below."
+        )
+        for warning, ((pet_a, a), (pet_b, b)) in zip(scheduler.conflict_warnings(), conflicts):
+            end = a.end_minute % (24 * 60)
+            st.markdown(
+                f"- {warning.replace('⚠️', '').strip()}  \n"
+                f"  💡 Try starting {pet_b.name}'s '{b.description}' at "
+                f"**{end // 60:02d}:{end % 60:02d}**, when '{a.description}' ends."
+            )
+    else:
+        st.success("No overlapping tasks. Your plan is conflict-free.")
+
+    # Flag conflicting rows in the table too, so the owner can see them in context.
+    clashing = {id(t) for pair in conflicts for _, t in pair}
+    st.table(
+        [
+            {
+                "Time": t.time_window(),
+                "Pet": p.name,
+                "Task": t.description,
+                "Minutes": t.duration_minutes,
+                "Priority": PRIORITY_BADGE[t.priority],
+                "Conflict": "⚠️" if id(t) in clashing else "",
+            }
+            for p, t in schedule
+        ]
+    )
+
+    # Explain the plan in plain language so the user knows how tasks were chosen.
+    st.caption(
+        "Why this plan: pending tasks were picked from high to low priority "
+        "until your available time ran out, then ordered by start time."
+    )
+
+# Pending tasks that didn't fit the time budget (usually lower-priority ones).
+if skipped:
+    with st.expander(f"Skipped today ({len(skipped)}): not enough time", expanded=True):
         st.table(
             [
                 {
@@ -219,25 +300,9 @@ if st.button("Generate schedule"):
                     "Pet": p.name,
                     "Task": t.description,
                     "Minutes": t.duration_minutes,
-                    "Priority": t.priority,
+                    "Priority": PRIORITY_BADGE[t.priority],
                 }
-                for p, t in schedule
+                for p, t in skipped
             ]
         )
-        st.caption(f"Uses {used} of {owner.available_minutes} available minutes.")
-
-        # Explain the plan in plain language so the user knows how tasks were chosen.
-        st.markdown(
-            "**Why this plan:** pending tasks were picked from high to low priority "
-            "until your available time ran out, then ordered by start time."
-        )
-        # Pending tasks that didn't fit the time budget (usually lower-priority ones).
-        for p, t in scheduler.skipped_tasks():
-            st.warning(
-                f"Skipped {p.name}: {t.description} ({t.duration_minutes} min, "
-                f"{t.priority}) because there wasn't enough time left."
-            )
-        # Scheduled tasks whose time windows overlap, for the same pet or different pets,
-        # since one owner can't do two things at once. They come back as ready-made messages.
-        for warning in scheduler.conflict_warnings():
-            st.error(warning)
+        st.caption("Raise your available minutes above to fit these in.")
